@@ -1,0 +1,197 @@
+---
+- name: Установка GNS3 Server на worker-ноду
+  hosts: k8s_workers
+  become: yes
+  gather_facts: yes
+  vars:
+    gns3_user:
+    gns3_port: 3080
+    frr_image: "frrouting/frr:v8.4.1"
+
+  tasks:
+
+  
+    # step 1 system update
+
+    - name: Обновить apt
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Установить базовые пакеты
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - software-properties-common
+          - python3-pip
+          - python3-venv
+        state: present
+
+   
+    # step 2 install docker
+   
+    - name: Добавить GPG-ключ Docker
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Добавить репозиторий Docker
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu noble stable"
+        state: present
+
+    - name: Установить Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: yes
+
+    - name: Запустить Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Добавить пользователя в группу docker
+      user:
+        name: "{{ gns3_user }}"
+        groups: docker
+        append: yes
+
+    
+    # step 3 install gns3 server
+   
+    - name: Добавить PPA GNS3
+      apt_repository:
+        repo: "ppa:gns3/ppa"
+        state: present
+        update_cache: yes
+
+    - name: Установить GNS3 Server
+      apt:
+        name:
+          - gns3-server
+          - gns3-gui
+        state: present
+
+    - name: Установить ubridge
+      apt:
+        name: ubridge
+        state: present
+
+    - name: Добавить пользователя в группу ubridge
+      user:
+        name: "{{ gns3_user }}"
+        groups: ubridge
+        append: yes
+
+   
+    # step 4 gns3 server configuration
+   
+    - name: Создать директорию конфигов GNS3
+      file:
+        path: "/home/{{ gns3_user }}/.config/GNS3"
+        state: directory
+        owner: "{{ gns3_user }}"
+        group: "{{ gns3_user }}"
+        mode: '0755'
+
+    - name: Создать директорию образов IOS
+      file:
+        path: "/home/{{ gns3_user }}/GNS3/images/IOS"
+        state: directory
+        owner: "{{ gns3_user }}"
+        group: "{{ gns3_user }}"
+        mode: '0755'
+
+    - name: Создать systemd-сервис GNS3
+      copy:
+        content: |
+          [Unit]
+          Description=GNS3 Server
+          After=network.target docker.service
+          Requires=docker.service
+
+          [Service]
+          Type=simple
+          User={{ gns3_user }}
+          Group={{ gns3_user }}
+          ExecStart=/usr/bin/gns3server --daemon
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/gns3.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Перезагрузить systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Запустить GNS3 Server
+      systemd:
+        name: gns3
+        state: started
+        enabled: yes
+
+   
+    # step 5 loading FRR images
+  
+    - name: Скачать FRR образ
+      command: docker pull {{ frr_image }}
+      changed_when: true
+
+   
+    # step 6 check
+   
+    - name: Подождать 5 секунд
+      pause:
+        seconds: 5
+
+    - name: Проверить GNS3 Server
+      command: curl -s http://localhost:{{ gns3_port }}/v2/version
+      register: gns3_version
+      changed_when: false
+
+    - name: Показать версию GNS3
+      debug:
+        msg: "GNS3: {{ gns3_version.stdout }}"
+
+    - name: Проверить порт 3080
+      command: ss -tlnp | grep {{ gns3_port }}
+      register: gns3_port_check
+      changed_when: false
+
+    - name: Показать статус порта
+      debug:
+        msg: "{{ gns3_port_check.stdout }}"
+
+    - name: Проверить Docker
+      command: docker ps
+      register: docker_ps
+      changed_when: false
+
+    - name: Показать Docker
+      debug:
+        msg: "{{ docker_ps.stdout_lines }}"
+
+   
+    # step 7 information
+   
+    - name: Показать информацию
+      debug:
+        msg:
+          - "GNS3 Server установлен!"
+          - "Web UI: http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}"
+          - "Образы IOS: /home/{{ gns3_user }}/GNS3/images/IOS/"
+          - "FRR образ: {{ frr_image }}"
